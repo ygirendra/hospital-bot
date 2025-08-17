@@ -1,10 +1,10 @@
 from flask import Flask, request, jsonify
 import os
 import requests
+import datetime
 from supabase_client import supabase
 
 app = Flask(__name__)
-
 
 # Doctor details
 doctors = [
@@ -32,7 +32,6 @@ lab_tests = {
     "Other Test": "Please request the test you want. Prices are based according to market."
 }
 
-# Auto reply system
 def auto_reply(message):
     message = message.lower()
 
@@ -56,10 +55,14 @@ def auto_reply(message):
     elif "," in message:
         try:
             name, phone = [x.strip() for x in message.split(",")]
-            supabase.table("appointments").insert({"name": name, "phone": phone, "created_at": datetime.datetime.now().isoformat()}).execute()
+            supabase.table("appointments").insert({
+                "name": name,
+                "phone": phone,
+                "created_at": datetime.datetime.now().isoformat()
+            }).execute()
             return f"✅ Appointment booked successfully!\n👤 Name: {name}\n📞 Phone: {phone}"
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Booking Error: {e}")
             return "❌ Booking failed. Please try again."
 
     elif "hello" in message or "hi" in message:
@@ -68,45 +71,53 @@ def auto_reply(message):
     else:
         return "Sorry, I didn't understand. You can ask for 'doctor', 'appointment', 'lab test', or 'book'."
 
-@app.route('/webhook', methods=['POST'])
+@app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
-    data = request.get_json()
-    user_message = data.get("message", "")
-    bot_reply = auto_reply(user_message)
-    return jsonify({"reply": bot_reply})
+    # WhatsApp verification (GET request)
+    if request.method == 'GET':
+        verify_token = os.getenv('WHATSAPP_VERIFY_TOKEN')
+        if request.args.get('hub.verify_token') == verify_token:
+            return request.args.get('hub.challenge')
+        return "Invalid verification token"
+
+    # Handle incoming messages (POST request)
+    data = request.json
+    
+    # WhatsApp format
+    if data.get('object') == 'whatsapp_business_account':
+        try:
+            message = data['entry'][0]['changes'][0]['value']['messages'][0]['text']['body']
+            sender = data['entry'][0]['changes'][0]['value']['contacts'][0]['wa_id']
+            reply = auto_reply(message)
+            
+            # Send reply via Meta API
+            headers = {
+                'Authorization': f"Bearer {os.getenv('WHATSAPP_TOKEN')}",
+                'Content-Type': 'application/json'
+            }
+            payload = {
+                "messaging_product": "whatsapp",
+                "to": sender,
+                "text": {"body": reply}
+            }
+            response = requests.post(
+                f"https://graph.facebook.com/v18.0/{os.getenv('WHATSAPP_PHONE_ID')}/messages",
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()
+            return jsonify({"status": "success"}), 200
+            
+        except Exception as e:
+            print(f"WhatsApp Error: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
+    
+    # General API format (for testing)
+    elif request.is_json and 'message' in request.json:
+        bot_reply = auto_reply(request.json['message'])
+        return jsonify({"reply": bot_reply})
+    
+    return jsonify({"status": "unhandled request"}), 400
+
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
-# WhatsApp verification
-@app.route('/whatsapp', methods=['GET'])
-def verify_webhook():
-    verify_token = os.getenv('WHATSAPP_VERIFY_TOKEN')
-    if request.args.get('hub.verify_token') == verify_token:
-        return request.args.get('hub.challenge')
-    return "Invalid verification token"
-
-# Handle incoming messages
-@app.route('/whatsapp', methods=['POST'])
-def handle_whatsapp():
-    data = request.json
-    if data.get('object') == 'whatsapp_business_account':
-        message = data['entry'][0]['changes'][0]['value']['messages'][0]['text']['body']
-        sender = data['entry'][0]['changes'][0]['value']['contacts'][0]['wa_id']
-        
-        reply = auto_reply(message)  # Use your existing function
-        
-        # Send reply via Meta API
-        headers = {
-            'Authorization': f"Bearer {os.getenv('WHATSAPP_TOKEN')}",
-            'Content-Type': 'application/json'
-        }
-        payload = {
-            "messaging_product": "whatsapp",
-            "to": sender,
-            "text": {"body": reply}
-        }
-        requests.post(
-            f"https://graph.facebook.com/v18.0/{os.getenv('WHATSAPP_PHONE_ID')}/messages",
-            headers=headers,
-            json=payload
-        )
-    return jsonify({"status": "success"}), 200
